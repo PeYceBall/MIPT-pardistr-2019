@@ -1,1 +1,0 @@
-/opt/modules/mpi/openmpi-4.0.2a1/bin/mpic++    -std=c++11    CMakeFiles/Mpi_1_MapReduce.dir/main.cpp.o  -o bin/Mpi_1_MapReduce -rdynamic 

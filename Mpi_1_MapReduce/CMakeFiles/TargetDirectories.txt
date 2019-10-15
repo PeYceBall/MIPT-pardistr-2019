@@ -1,1 +1,0 @@
-/home/common/KAiTP/pd79502/Mpi_1_MapReduce/CMakeFiles/Mpi_1_MapReduce.dir
