@@ -138,20 +138,22 @@ int main(int argc, char** argv) {
     std::vector<std::string> input_files = files_in_dir(map_inputs_path);
 
     // send file names to mappers while there are any left
-    // probably should be done with MPI_Isend
     for (int i = num_reducers + 1, j = 0; j < input_files.size(); i++, j++) {
       if (i >= world_size) {
         i = num_reducers + 1;
       }
 
       int len = input_files[j].size();
-      MPI_Send(input_files[j].c_str(), len + 1, MPI_CHAR, i, 0, MPI_COMM_WORLD);
+      MPI_Request request;
+      MPI_Isend(input_files[j].c_str(), len + 1, MPI_CHAR, i, 0, MPI_COMM_WORLD,
+                &request);
     }
 
     // send stop signs to all mappers
     for (int i = num_reducers + 1; i < world_size; i++) {
       char stop_sign = '\0';
-      MPI_Send(&stop_sign, 1, MPI_CHAR, i, 0, MPI_COMM_WORLD);
+      MPI_Request request;
+      MPI_Isend(&stop_sign, 1, MPI_CHAR, i, 0, MPI_COMM_WORLD, &request);
     }
 
     // get responses from mappers
@@ -189,8 +191,11 @@ int main(int argc, char** argv) {
     std::vector<std::string> map_input_paths;
     while (true) {
       char map_input_path[100];
-      MPI_Recv(map_input_path, 100, MPI_CHAR, 0, 0, MPI_COMM_WORLD,
-               MPI_STATUS_IGNORE);
+      MPI_Request request;
+      MPI_Irecv(map_input_path, 100, MPI_CHAR, 0, 0, MPI_COMM_WORLD, &request);
+      MPI_Status status;
+      MPI_Wait(&request, &status);
+
       if (strlen(map_input_path) == 0) {
         break;
       }
