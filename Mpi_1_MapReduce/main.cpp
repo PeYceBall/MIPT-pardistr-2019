@@ -14,70 +14,6 @@
 #include "mapper.hpp"
 #include "reducer.hpp"
 
-// Process output of particular mapper and write (key, value) directly
-// to corresponding reducer's input. This method may create a lot of contention
-// since all mappers will write to the same file simultaneously. Although it
-// seems that FS allows concurrent writes, it will slow down the whole process.
-// This should probably be rewritten to regular shuffle.
-void shuffle(const char* input_path, const char* output_dir, int num_reducers) {
-  std::ifstream input_file(input_path);
-  // caution needed if num_reducers is big enough
-  std::vector<std::ofstream> output_files(num_reducers);
-  for (int i = 0; i < output_files.size(); i++) {
-    char temp[100];
-    sprintf(temp, "%s/%d", output_dir, i);
-    output_files[i].open(temp, std::ios_base::app);
-  }
-
-  std::string key, value;
-  std::hash<std::string> hash_func;
-  // assume map produces output of "key \t value"
-  while (input_file >> key >> value) {
-    int reducer = hash_func(key) % num_reducers;
-    output_files[reducer] << key << "\t" << value << std::endl;
-  }
-
-  for (int i = 0; i < output_files.size(); i++) {
-    output_files[i].close();
-  }
-
-  input_file.close();
-  return;
-}
-
-// sort data by keys, join values with same key
-// doesn't work if data doesn't fit in memory
-void sort(const char* input_path, const char* output_path) {
-  std::ifstream input_file(input_path);
-  std::ofstream output_file(output_path);
-
-  std::map<std::string, std::vector<std::string>> map;
-  std::string key, value;
-
-  while (input_file >> key >> value) {
-    if (map.find(key) == map.end()) {
-      std::vector<std::string> temp;
-      temp.push_back(value);
-      map.insert({key, temp});
-    } else {
-      map.find(key)->second.push_back(value);
-    }
-  }
-
-  // write "key  value1  value2  ..." to file
-  for (auto it = map.begin(); it != map.end(); it++) {
-    output_file << it->first << "\t";
-    for (auto v : it->second) {
-      output_file << v << "\t";
-    }
-
-    output_file << std::endl;
-  }
-
-  input_file.close();
-  output_file.close();
-}
-
 // get list of all file names in directory
 std::vector<std::string> files_in_dir(const char* path) {
   std::vector<std::string> result;
@@ -100,6 +36,71 @@ std::vector<std::string> files_in_dir(const char* path) {
   }
 
   return result;
+}
+
+// Process output of particular map and write (key, value)
+// to corresponding reducer's directory
+void shuffle(std::fstream& input_file, int mapper, int map_job,
+             int num_reducers, const char* output_dir) {
+  std::vector<std::ofstream> output_files(num_reducers);
+  for (int i = 0; i < output_files.size(); i++) {
+    char temp[200];
+    // don't want different mappers to overwrite same file
+    sprintf(temp, "%s/%d/%d_%d", output_dir, i, mapper, map_job);
+    output_files[i].open(temp);
+  }
+
+  std::string key, value;
+  std::hash<std::string> hash_func;
+  // assume map produces output of "key \t value"
+  while (input_file >> key >> value) {
+    int reducer = hash_func(key) % num_reducers;
+    output_files[reducer] << key << "\t" << value << std::endl;
+  }
+
+  for (int i = 0; i < output_files.size(); i++) {
+    output_files[i].close();
+  }
+
+  input_file.close();
+  return;
+}
+
+// merge all map outputs with same keys from different files and sort them by
+// key
+void sort(const char* input_dir, const char* output_path) {
+  std::ofstream output_file(output_path);
+
+  std::map<std::string, std::vector<std::string>> map;
+  std::string key, value;
+  std::vector<std::string> input_files = files_in_dir(input_dir);
+
+  for (int i = 0; i < input_files.size(); i++) {
+    std::ifstream input_file(input_files[i]);
+    while (input_file >> key >> value) {
+      if (map.find(key) == map.end()) {
+        std::vector<std::string> temp;
+        temp.push_back(value);
+        map.insert({key, temp});
+      } else {
+        map.find(key)->second.push_back(value);
+      }
+    }
+
+    input_file.close();
+  }
+
+  // write "key  value1  value2  ..." to file
+  for (auto it = map.begin(); it != map.end(); it++) {
+    output_file << it->first << "\t";
+    for (auto v : it->second) {
+      output_file << v << "\t";
+    }
+
+    output_file << std::endl;
+  }
+
+  output_file.close();
 }
 
 // wait until sender process sends notify
@@ -137,7 +138,7 @@ int main(int argc, char** argv) {
 
     std::vector<std::string> input_files = files_in_dir(map_inputs_path);
 
-    // send file names to mappers while there are any left
+    // send file names to mappers while there are some left
     for (int i = num_reducers + 1, j = 0; j < input_files.size(); i++, j++) {
       if (i >= world_size) {
         i = num_reducers + 1;
@@ -173,17 +174,24 @@ int main(int argc, char** argv) {
     wait(0);
 
     // sort data by keys, join values with the same key
-    char sort_input_path[100], sort_output_path[100];
-    sprintf(sort_input_path, "intermediate/%d", world_rank - 1);
+    char sort_input_dir[100], sort_output_path[100];
+    sprintf(sort_input_dir, "intermediate/%d", world_rank - 1);
     sprintf(sort_output_path, "reduce inputs/%d", world_rank - 1);
-    sort(sort_input_path, sort_output_path);
+
+    sort(sort_input_dir, sort_output_path);
 
     // reduce
     char reduce_input_path[100], reduce_output_path[100];
     strcpy(reduce_input_path, sort_output_path);
     sprintf(reduce_output_path, "%s/%d", argv[2], world_rank - 1);
-    reduce(reduce_input_path, reduce_output_path);
 
+    std::fstream reduce_input_file(reduce_input_path);
+    std::ofstream reduce_output_file(reduce_output_path);
+
+    reduce(reduce_input_file, reduce_output_file);
+
+    reduce_input_file.close();
+    reduce_output_file.close();
   } else {
     // mapper routine
 
@@ -206,11 +214,19 @@ int main(int argc, char** argv) {
     // map
     for (int i = 0; i < map_input_paths.size(); i++) {
       char map_output_path[100];
-      sprintf(map_output_path, "map outputs/map output %d.%d", world_rank, i);
-      map(map_input_paths[i].c_str(), map_output_path);
+      sprintf(map_output_path, "map outputs/%d_%d", world_rank, i);
 
-      // write result of map to R different files
-      shuffle(map_output_path, "intermediate", num_reducers);
+      std::fstream map_input_file(map_input_paths[i]);
+      std::ofstream map_output_file(map_output_path);
+
+      map(map_input_file, map_output_file);
+
+      map_input_file.close();
+      map_output_file.close();
+
+      // shuffle result of map to reducers
+      std::fstream shuffle_input_file(map_output_path);
+      shuffle(shuffle_input_file, world_rank, i, num_reducers, "intermediate");
     }
 
     // notify Master that job is done

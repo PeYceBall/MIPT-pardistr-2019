@@ -22,6 +22,11 @@ for f in $( ls input\ files/); do
     split -b 4096 --additional-suffix="$f" "input files/$f" "map inputs/"
 done
 
+for i in $(seq 0 $(($NUM_REDUCERS - 1)))
+do
+    mkdir "intermediate/$i"
+done
+
 mpiexec bin/Mpi_1_MapReduce "$INPUT_DIR" "$OUTPUT_DIR" "$NUM_REDUCERS"
 
 rm -rf "map inputs"
