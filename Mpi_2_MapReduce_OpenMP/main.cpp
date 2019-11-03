@@ -10,6 +10,9 @@
 #include <map>
 #include <string>
 #include <vector>
+#include <omp.h>
+#include <sstream>
+#include <ctime>
 
 #include "mapper.hpp"
 #include "reducer.hpp"
@@ -115,6 +118,88 @@ void notify(int receiver) {
   MPI_Send(&msg, 1, MPI_INT, receiver, 0, MPI_COMM_WORLD);
 }
 
+// executed by each mapper
+void map_routine(std::fstream& map_fin, int world_rank, int i,
+                    int num_reducers) {
+  char map_output_path[100];
+  sprintf(map_output_path, "map outputs/%d_%d", world_rank, i);
+
+  std::ofstream map_fout(map_output_path);
+
+  map_fin.seekg(0, std::ios::end);
+  int size = map_fin.tellg();
+
+  int pos;
+#pragma omp parallel default(shared) private(pos) if (size > 1000)
+  {
+    int num_threads = omp_get_num_threads();
+    int chunk_size = size / num_threads;
+
+#pragma omp for schedule(static)
+    for (pos = 0; pos < size; pos += chunk_size) {
+      std::string buffer(chunk_size, ' ');
+#pragma omp critical
+      {
+        map_fin.seekg(pos);
+        map_fin.read(&buffer[0], chunk_size);
+      }
+
+      std::stringstream map_input_stream(buffer);
+      std::vector<std::string> map_output;
+
+      map(map_input_stream, map_output);
+
+#pragma omp critical
+      {
+        for (int i = 0; i < map_output.size(); i++) {
+          map_fout << map_output[i] << std::endl;
+        }
+      }
+    }
+  }
+
+  map_fin.close();
+  map_fout.close();
+
+  // shuffle result of map to reducers
+  std::fstream shuffle_fin(map_output_path);
+  shuffle(shuffle_fin, world_rank, i, num_reducers, "intermediate");
+}
+
+void reduce_routine(std::fstream& reduce_fin, std::ofstream& reduce_fout) {
+  reduce_fin.seekg(0, std::ios::end);
+  int size = reduce_fin.tellg();
+
+  int pos;
+#pragma omp parallel default(shared) private(pos) if (size > 1000)
+  {
+    int num_threads = omp_get_num_threads();
+    int chunk_size = size / num_threads;
+
+#pragma omp for schedule(static)
+    for (pos = 0; pos < size; pos += chunk_size) {
+      std::string buffer(chunk_size, ' ');
+#pragma omp critical
+      {
+        reduce_fin.seekg(pos);
+        reduce_fin.read(&buffer[0], chunk_size);
+      }
+
+      std::stringstream reduce_input_stream(buffer);
+      std::vector<std::string> reduce_output;
+
+      reduce(reduce_input_stream, reduce_output);
+
+#pragma omp critical
+      {
+        for (int i = 0; i < reduce_output.size(); i++) {
+          reduce_fout << reduce_output[i] << std::endl;
+        }
+      }
+    }
+  }
+}
+
 // argv[1] -- input directory (not used)
 // argv[2] -- output directory
 // argv[3] -- number of reducers(R)
@@ -187,13 +272,13 @@ int main(int argc, char** argv) {
     strcpy(reduce_input_path, sort_output_path);
     sprintf(reduce_output_path, "%s/%d", argv[2], world_rank - 1);
 
-    std::fstream reduce_input_file(reduce_input_path);
-    std::ofstream reduce_output_file(reduce_output_path);
+    std::fstream reduce_fin(reduce_input_path);
+    std::ofstream reduce_fout(reduce_output_path);
 
-    reduce(reduce_input_file, reduce_output_file);
+    reduce_routine(reduce_fin, reduce_fout);
 
-    reduce_input_file.close();
-    reduce_output_file.close();
+    reduce_fin.close();
+    reduce_fout.close();
   } else {
     // mapper routine
 
@@ -213,22 +298,15 @@ int main(int argc, char** argv) {
       map_input_paths.push_back(map_input_path);
     }
 
+
     // map
     for (int i = 0; i < map_input_paths.size(); i++) {
-      char map_output_path[100];
-      sprintf(map_output_path, "map outputs/%d_%d", world_rank, i);
+    double start_time = omp_get_wtime();
 
-      std::fstream map_input_file(map_input_paths[i]);
-      std::ofstream map_output_file(map_output_path);
-
-      map(map_input_file, map_output_file);
-
-      map_input_file.close();
-      map_output_file.close();
-
-      // shuffle result of map to reducers
-      std::fstream shuffle_input_file(map_output_path);
-      shuffle(shuffle_input_file, world_rank, i, num_reducers, "intermediate");
+      std::fstream map_fin(map_input_paths[i]);
+      map_routine(map_fin, world_rank, i, num_reducers);
+      
+      double end_time = omp_get_wtime();
     }
 
     // notify Master that job is done
