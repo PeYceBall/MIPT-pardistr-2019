@@ -19,7 +19,7 @@ mkdir "reduce inputs"
 mkdir "$OUTPUT_DIR"
 
 for f in $( ls input\ files/); do
-    split -b 4096 --additional-suffix="$f" "input files/$f" "map inputs/"
+    split -b 16000000 --additional-suffix="$f" "input files/$f" "map inputs/"
 done
 
 for i in $(seq 0 $(($NUM_REDUCERS - 1)))

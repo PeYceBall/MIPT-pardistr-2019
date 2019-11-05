@@ -1,18 +1,18 @@
 #include <dirent.h>
 #include <mpi.h>
+#include <omp.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
+#include <ctime>
 #include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
+#include <sstream>
 #include <string>
 #include <vector>
-#include <omp.h>
-#include <sstream>
-#include <ctime>
 
 #include "mapper.hpp"
 #include "reducer.hpp"
@@ -45,6 +45,8 @@ std::vector<std::string> files_in_dir(const char* path) {
 // to corresponding reducer's directory
 void shuffle(std::fstream& input_file, int mapper, int map_job,
              int num_reducers, const char* output_dir) {
+  double start_time = omp_get_wtime();
+
   std::vector<std::ofstream> output_files(num_reducers);
   for (int i = 0; i < output_files.size(); i++) {
     char temp[200];
@@ -53,12 +55,38 @@ void shuffle(std::fstream& input_file, int mapper, int map_job,
     output_files[i].open(temp);
   }
 
-  std::string key, value;
-  std::hash<std::string> hash_func;
-  // assume map produces output of "key \t value"
-  while (input_file >> key >> value) {
-    int reducer = hash_func(key) % num_reducers;
-    output_files[reducer] << key << "\t" << value << std::endl;
+  std::string line;
+  std::vector<std::string> lines;
+  while (std::getline(input_file, line)) {
+    lines.push_back(line);
+  }
+
+  int i;
+#pragma omp parallel default(shared) private(i)
+  {
+    std::string key, value;
+    std::hash<std::string> hash_func;
+    std::vector<std::vector<std::string>> to_write(num_reducers);
+
+#pragma omp for schedule(static)
+    for (i = 0; i < lines.size(); i++) {
+      std::istringstream iss(lines[i]);
+      // assume map produces output of "key \t value"
+      iss >> key >> value;
+      int reducer = hash_func(key) % num_reducers;
+      std::string temp = key + "\t" + value + "\n";
+      to_write[reducer].push_back(temp);
+    }
+
+// data race prevention
+#pragma omp critical
+    {
+      for (int reducer = 0; reducer < to_write.size(); reducer++) {
+        for (int j = 0; j < to_write[reducer].size(); j++) {
+          output_files[reducer] << to_write[reducer][j];
+        }
+      }
+    }
   }
 
   for (int i = 0; i < output_files.size(); i++) {
@@ -66,11 +94,12 @@ void shuffle(std::fstream& input_file, int mapper, int map_job,
   }
 
   input_file.close();
-  return;
+
+  double end_time = omp_get_wtime();
 }
 
-// merge all map outputs with same keys from different files and sort them by
-// key
+// merge all map outputs with same keys from different files
+// and sort them by key
 void sort(const char* input_dir, const char* output_path) {
   std::ofstream output_file(output_path);
 
@@ -120,7 +149,7 @@ void notify(int receiver) {
 
 // executed by each mapper
 void map_routine(std::fstream& map_fin, int world_rank, int i,
-                    int num_reducers) {
+                 int num_reducers) {
   char map_output_path[100];
   sprintf(map_output_path, "map outputs/%d_%d", world_rank, i);
 
@@ -166,6 +195,7 @@ void map_routine(std::fstream& map_fin, int world_rank, int i,
   shuffle(shuffle_fin, world_rank, i, num_reducers, "intermediate");
 }
 
+// executed by each reducer
 void reduce_routine(std::fstream& reduce_fin, std::ofstream& reduce_fout) {
   reduce_fin.seekg(0, std::ios::end);
   int size = reduce_fin.tellg();
@@ -173,6 +203,9 @@ void reduce_routine(std::fstream& reduce_fin, std::ofstream& reduce_fout) {
   int pos;
 #pragma omp parallel default(shared) private(pos) if (size > 1000)
   {
+    // splits reduce input file by bytes.
+    // Possible loss of data consistency but faster
+    // than splitting by lines.
     int num_threads = omp_get_num_threads();
     int chunk_size = size / num_threads;
 
@@ -215,8 +248,13 @@ int main(int argc, char** argv) {
 
   MPI_Comm_rank(MPI_COMM_WORLD, &world_rank);
 
+  // probably should be done using groups
+  // 0 -- master, 1..num_reducers -- reducers, num_reducers+1..world_size-1 --
+  // mappers
   if (world_rank == 0) {
     // master routine
+
+    double start_time = omp_get_wtime();
 
     // get names of all files in input directory
     const char* map_inputs_path = "map inputs";
@@ -254,6 +292,15 @@ int main(int argc, char** argv) {
       notify(i);
     }
 
+    // wait for all reducers to finish(since we want to measure the time)
+    for (int i = 1; i <= num_reducers; i++) {
+      wait(i);
+    }
+
+    double end_time = omp_get_wtime();
+
+    std::cout << "Time: " << end_time - start_time << std::endl;
+
   } else if (world_rank <= num_reducers) {
     // reducer routine
 
@@ -279,6 +326,9 @@ int main(int argc, char** argv) {
 
     reduce_fin.close();
     reduce_fout.close();
+
+    // notify master that job is done
+    notify(0);
   } else {
     // mapper routine
 
@@ -298,15 +348,10 @@ int main(int argc, char** argv) {
       map_input_paths.push_back(map_input_path);
     }
 
-
-    // map
+    // map and shuffle
     for (int i = 0; i < map_input_paths.size(); i++) {
-    double start_time = omp_get_wtime();
-
       std::fstream map_fin(map_input_paths[i]);
       map_routine(map_fin, world_rank, i, num_reducers);
-      
-      double end_time = omp_get_wtime();
     }
 
     // notify Master that job is done
