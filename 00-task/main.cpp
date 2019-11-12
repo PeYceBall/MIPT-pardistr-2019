@@ -24,17 +24,13 @@ int main(int argc, char** argv) {
     int batch_size = N / world_size;
 
     // divide a into almost equal parts
-    int i = batch_size;
-    int j = 1;
-
-    while (i < N) {
+    for(int i = batch_size, j = 1; i < N; j++){
       // if the rest of a cannot be divided equally
       // make the next part one element bigger
       bool b = (N - i) % (world_size - j) != 0;
       MPI_Send(&a[i], batch_size + (int)b, MPI_INT, j, j, MPI_COMM_WORLD);
 
       i += (batch_size + (int)b);
-      j++;
     }
 
     partial_sums[0] = std::accumulate(a, a + batch_size, 0);
@@ -55,6 +51,8 @@ int main(int argc, char** argv) {
     std::cout << (real_sum == total_sum ? "Sums are equal"
                                         : "Sums are not equal")
               << std::endl;
+
+    delete[] a;
   }
 
   if (world_rank != 0) {
@@ -69,6 +67,8 @@ int main(int argc, char** argv) {
 
     int sum = std::accumulate(buf, buf + buf_size, 0);
     MPI_Send(&sum, 1, MPI_INT, 0, 1, MPI_COMM_WORLD);
+
+    delete[] buf;
   }
 
   MPI_Finalize();
